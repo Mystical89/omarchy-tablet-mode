@@ -457,28 +457,81 @@ tweaks_restore() {
 # Hyprland restores a position it kept from before the drag, so a window dragged across the
 # screen lands back at its old spot (and reads as "it centred itself"). Sample the floating
 # window often enough to know where it was a moment ago; the drag itself emits no event.
-remember_geometry() {
-  local sample address prev_addr prev_time prev_x prev_y prev_w prev_h
-  sample=$(hyprctl activewindow -j 2>/dev/null |
-    jq -r 'if .floating == true and (.address // "") != ""
-           then "\(.address) \(.at[0]) \(.at[1]) \(.size[0]) \(.size[1])" else empty end')
-  [[ -n $sample ]] || return 0
-  address=${sample%% *}
+# One tick of the loop. A drag emits no event, so the only way to know where a window was let go
+# is to watch it move: a floating window whose geometry changed since the last tick is the one
+# being dragged, and its position at that moment is the drop point (the cursor sample corrects
+# for the rest of the way). The same tick puts back any window that is tiled while its workspace
+# floats — a window whose changefloatingmode event was missed has nothing else to recover it.
+PREV_CLIENTS=""
 
-  if [[ -f $GEOMETRY ]]; then
-    read -r prev_addr prev_time prev_x prev_y prev_w prev_h <"$GEOMETRY"
-    [[ $prev_addr == "$address" && "$prev_x $prev_y $prev_w $prev_h" == "${sample#* }" ]] && return 0
+reconcile_windows() {
+  local clients moved cursor ws address layout
+  clients=$(hyprctl clients -j 2>/dev/null) || return 0
+  [[ -n $clients ]] || return 0
+
+  # On the first tick there is nothing to diff against, and a sample left over from the last
+  # session can be stale by however the window was moved in between: take one of the focused
+  # window straight away.
+  if [[ -z $PREV_CLIENTS ]]; then
+    local first
+    first=$(jq -r 'first(.[] | select(.floating == true and .focusHistoryID == 0)) // empty' <<<"$clients")
+    if [[ -n $first ]]; then
+      cursor=$(hyprctl cursorpos 2>/dev/null | tr -d ' ')
+      [[ $cursor =~ ^-?[0-9]+,-?[0-9]+$ ]] || cursor=-
+      printf '%s %s %s %s %s %s %s\n' "$(jq -r '.address' <<<"$first")" "$(date +%s)" \
+        "$(jq -r '.at[0]' <<<"$first")" "$(jq -r '.at[1]' <<<"$first")" \
+        "$(jq -r '.size[0]' <<<"$first")" "$(jq -r '.size[1]' <<<"$first")" "$cursor" >"$GEOMETRY"
+    fi
   fi
-  printf '%s %s %s\n' "$address" "$(date +%s)" "${sample#* }" >"$GEOMETRY"
+
+  # Every tick: a floating window whose geometry changed since the last one is being dragged.
+  if [[ -n $PREV_CLIENTS ]]; then
+    moved=$(jq -r --argjson prev "$PREV_CLIENTS" '
+      .[] | select(.floating == true) | . as $w
+      | ($prev[] | select(.address == $w.address)) as $p
+      | select($w.at != $p.at or $w.size != $p.size)
+      | "\(.address) \(.at[0]) \(.at[1]) \(.size[0]) \(.size[1])"' <<<"$clients" 2>/dev/null)
+    if [[ -n $moved ]]; then
+      cursor=$(hyprctl cursorpos 2>/dev/null | tr -d ' ')
+      [[ $cursor =~ ^-?[0-9]+,-?[0-9]+$ ]] || cursor=-
+      printf '%s %s %s %s\n' "${moved%% *}" "$(date +%s)" "${moved#* }" "$cursor" >"$GEOMETRY"
+    fi
+  fi
+  PREV_CLIENTS=$clients
+
+  # Every second: put back a window that is tiled on a workspace that floats. refloat() itself
+  # keeps that to one attempt per window every two seconds, so this only bounds how long a
+  # window whose event was missed stays tiled.
+  (( $(now_ms) - ${RECONCILE_AT:-0} >= 1000 )) || return 0
+  RECONCILE_AT=$(now_ms)
+
+  # The layout is asked once per window here; there are only a few, and only when one is tiled.
+  while IFS=$'\t' read -r address ws; do
+    [[ -n $address && -n $ws ]] || continue
+    layout=$(omarchy-hyprland-workspace-layout-current "$ws" 2>/dev/null)
+    [[ $layout == floating ]] && refloat "${address#0x}"
+  done < <(jq -r '.[] | select(.floating == false and (.fullscreen // 0) == 0 and (.workspace.id // 0) >= 1)
+                  | "\(.address)\t\(.workspace.id)"' <<<"$clients")
 }
 
 restore_geometry() { # <address as hyprctl prints it, with the 0x>
-  local addr time x y w h
+  local addr time x y w h cx cy cursor dx dy
   [[ -f $GEOMETRY ]] || return 0
-  read -r addr time x y w h <"$GEOMETRY"
+  read -r addr time x y w h cx cy <"$GEOMETRY"
   [[ $addr == "$1" ]] || return 0
-  (( $(date +%s) - time <= 3 )) || return 0
+  (( $(date +%s) - time <= 60 )) || return 0
   [[ $x =~ ^-?[0-9]+$ && $y =~ ^-?[0-9]+$ && $w =~ ^[0-9]+$ && $h =~ ^[0-9]+$ ]] || return 0
+
+  cursor=$(hyprctl cursorpos 2>/dev/null | tr -d ' ')
+  if [[ $cx =~ ^-?[0-9]+$ && $cy =~ ^-?[0-9]+$ && $cursor =~ ^(-?[0-9]+),(-?[0-9]+)$ ]]; then
+    dx=$(( BASH_REMATCH[1] - cx ))
+    dy=$(( BASH_REMATCH[2] - cy ))
+    # Only trust a correction that keeps the cursor over the window it was dragging.
+    if (( dx > -w && dx < w && dy > -h && dy < h )); then
+      x=$(( x + dx ))
+      y=$(( y + dy ))
+    fi
+  fi
 
   # Resize first: it keeps the window's centre, which would undo a move issued before it.
   hypr_eval "hl.dispatch(hl.dsp.window.resize({ x = $w, y = $h, window = \"address:$1\" }))"
@@ -494,28 +547,26 @@ restore_geometry() { # <address as hyprctl prints it, with the 0x>
 # its own tiling cannot turn this into a loop.
 refloat() { # <address from the changefloatingmode event, without the 0x>
   local address=$1 ws now seen count
-  [[ -n $address ]] || return 0
-  hypr_available || return 0
+  [[ -n $address ]] || { log "refloat: no address in the event"; return 0; }
+  hypr_available || { log "refloat: Hyprland isn't reachable"; return 0; }
 
   ws=$(hyprctl clients -j 2>/dev/null |
     jq -r --arg a "0x$address" 'first(.[] | select(.address == $a) | .workspace.id) // empty')
-  [[ -n $ws ]] || return 0
-  [[ $(omarchy-hyprland-workspace-layout-current "$ws" 2>/dev/null) == floating ]] || return 0
+  [[ -n $ws ]] || { log "refloat: $address isn't in the client list"; return 0; }
+  local layout
+  layout=$(omarchy-hyprland-workspace-layout-current "$ws" 2>/dev/null)
+  [[ $layout == floating ]] || { log "refloat: workspace $ws is $layout, not floating"; return 0; }
 
+  # The tick asks again every two seconds for as long as a window stays tiled, so attempts are
+  # throttled to one per window every two seconds. No attempt counter: a window the user drags
+  # repeatedly looks exactly like a window that will not stay floated, and counting them made
+  # the hook give up on a window the user was simply using.
   now=$(date +%s)
-  read -r seen count < <(awk -v a="$address" '$1 == a { print $2, $3 }' "$REFLOAT" 2>/dev/null)
-  if ((now - ${seen:-0} < 60)); then
-    if [[ ${count:-0} -ge 5 ]]; then
-      log "refloat: $address went tiled again; leaving it alone after 5 tries in a minute"
-      return 0
-    fi
-  else
-    count=0
-  fi
-  count=$(( ${count:-0} + 1 ))
+  read -r seen _ < <(awk -v a="$address" '$1 == a { print $2 }' "$REFLOAT" 2>/dev/null)
+  [[ -n ${seen:-} ]] && ((now - seen < 2)) && return 0
   {
     grep -v "^$address " "$REFLOAT" 2>/dev/null
-    printf '%s %s %s\n' "$address" "$now" "$count"
+    printf '%s %s\n' "$address" "$now"
   } >"$REFLOAT.new" 2>/dev/null && mv "$REFLOAT.new" "$REFLOAT"
 
   log "refloat: $address tiled on floating workspace $ws; floating it again"
@@ -707,7 +758,11 @@ cmd__hypr_reader() {
         "changefloatingmode>>"*)
           # "address,0" is a window that just lost floating; 1 is one that gained it.
           ev=${line#*>>}
-          [[ ${ev##*,} == 0 ]] && echo "hypr unfloat ${ev%%,*}"
+          if [[ ${ev##*,} == 0 ]]; then
+            echo "hypr unfloat ${ev%%,*}"
+          else
+            echo "hypr floated ${ev%%,*}"
+          fi
           ;;
       esac
     done
@@ -1032,6 +1087,7 @@ on_hypr() {
     "monitor "*) [[ ${1#monitor } == "$(internal_output 2>/dev/null)" ]] && reapply monitor && sync_panel ;;
     "removed "*) [[ ${1#removed } == "$(internal_output 2>/dev/null)" ]] && sync_panel ;;
     "unfloat "*) [[ $MODE == tablet ]] && refloat "${1#unfloat }" ;;
+    "floated "*) FLOATED_AT=$(now_ms) FLOATED_ADDR=${1#floated } ;;
   esac
   return 0
 }
@@ -1098,7 +1154,7 @@ handle_event() {
     usb) on_usb ;;
     hypr) on_hypr "$arg" ;;
     sleep) on_sleep "$arg" ;;
-    tick) [[ $MODE == tablet ]] && remember_geometry ;;
+    tick) [[ $MODE == tablet ]] && reconcile_windows ;;
     cmd)
       local -a words
       read -ra words <<<"$arg" # split into words without glob expansion: "rotate 1" -> rotate 1
@@ -1169,7 +1225,7 @@ cmd_daemon() {
   ( while :; do sleep 0.2; printf 'tick\n' >&3 || exit 0; done ) &
   TICKER=$!
 
-  MODE=laptop SOURCE=start LOCK=false ORIENT="" OSK_VISIBLE=false TWEAKS_ON=false
+  MODE=laptop SOURCE=start LOCK=false ORIENT="" OSK_VISIBLE=false TWEAKS_ON=false FLOATED_AT=0 FLOATED_ADDR=
   PENDING="" PENDING_AT=0 KBD_PENDING="" ASLEEP=false RESUME_AT="" OSK_RESTORE=false
   DESK=false OSK_RESTORE_DESK=false BLOCKED_NOTIFIED=""
   KBD=$(keyboard_state)
