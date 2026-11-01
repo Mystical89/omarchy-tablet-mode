@@ -81,7 +81,10 @@ RestartSec=3
 WantedBy=graphical-session.target
 EOF
   systemctl --user daemon-reload
-  systemctl --user enable --now osk-window-fit.service
+  systemctl --user enable osk-window-fit.service
+  # `enable --now` does NOT restart an already running unit, so a re-install
+  # would keep the old ExecStart (and the old clone path) alive.
+  systemctl --user restart osk-window-fit.service
   sleep 1
   systemctl --user is-active --quiet osk-window-fit.service \
     && echo "   ✓ сервис активен" || die "сервис не поднялся: journalctl --user -u osk-window-fit"
