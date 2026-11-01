@@ -27,6 +27,7 @@ ROTATED="$RUN_DIR/rotated"           # "<output> <transform before the first rot
 TOUCH_MAPPED="$RUN_DIR/touch-mapped" # input devices whose transform/output were set
 TWEAKS="$RUN_DIR/tweaks.lua"         # hl.config(...) that puts the pre-tweak values back
 REFLOAT="$RUN_DIR/refloat"           # "<address> <epoch> <tries>": windows already put back once
+GEOMETRY="$RUN_DIR/geometry"         # "<address> <epoch> <x> <y> <w> <h>": last place a window floated at
 # The last clean record of the user's own values, kept across sessions: used when the live
 # values can't be trusted because they already look like our tweaks.
 BASELINE="${TABLET_MODE_BASELINE:-${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-tablet-mode/baseline.lua}"
@@ -452,6 +453,39 @@ tweaks_restore() {
   TWEAKS_ON=false
 }
 
+# Putting a window back into floating does not put it back where the user left it:
+# Hyprland restores a position it kept from before the drag, so a window dragged across the
+# screen lands back at its old spot (and reads as "it centred itself"). Sample the floating
+# window often enough to know where it was a moment ago; the drag itself emits no event.
+remember_geometry() {
+  local sample address prev_addr prev_time prev_x prev_y prev_w prev_h
+  sample=$(hyprctl activewindow -j 2>/dev/null |
+    jq -r 'if .floating == true and (.address // "") != ""
+           then "\(.address) \(.at[0]) \(.at[1]) \(.size[0]) \(.size[1])" else empty end')
+  [[ -n $sample ]] || return 0
+  address=${sample%% *}
+
+  if [[ -f $GEOMETRY ]]; then
+    read -r prev_addr prev_time prev_x prev_y prev_w prev_h <"$GEOMETRY"
+    [[ $prev_addr == "$address" && "$prev_x $prev_y $prev_w $prev_h" == "${sample#* }" ]] && return 0
+  fi
+  printf '%s %s %s\n' "$address" "$(date +%s)" "${sample#* }" >"$GEOMETRY"
+}
+
+restore_geometry() { # <address as hyprctl prints it, with the 0x>
+  local addr time x y w h
+  [[ -f $GEOMETRY ]] || return 0
+  read -r addr time x y w h <"$GEOMETRY"
+  [[ $addr == "$1" ]] || return 0
+  (( $(date +%s) - time <= 3 )) || return 0
+  [[ $x =~ ^-?[0-9]+$ && $y =~ ^-?[0-9]+$ && $w =~ ^[0-9]+$ && $h =~ ^[0-9]+$ ]] || return 0
+
+  # Resize first: it keeps the window's centre, which would undo a move issued before it.
+  hypr_eval "hl.dispatch(hl.dsp.window.resize({ x = $w, y = $h, window = \"address:$1\" }))"
+  hypr_eval "hl.dispatch(hl.dsp.window.move({ x = $x, y = $y, window = \"address:$1\" }))"
+  log "refloat: put $1 back at $x,$y $w x $h"
+}
+
 # Omarchy's floating mode floats a window once and never again: whatever tiles one
 # afterwards — a drag that lands on the title bar, an app tiling itself — leaves it tiled on
 # a floating workspace until a window opens or the workspace is switched, and the user reads
@@ -486,6 +520,7 @@ refloat() { # <address from the changefloatingmode event, without the 0x>
 
   log "refloat: $address tiled on floating workspace $ws; floating it again"
   hypr_eval "hl.dispatch(hl.dsp.window.float({ action = \"on\", window = \"address:0x$address\" }))"
+  restore_geometry "0x$address"
 }
 
 # --- on-screen keyboard (wvkbd) ----------------------------------------------------
@@ -1074,6 +1109,10 @@ handle_event() {
 apply_pending() {
   local now
   now=$(now_ms)
+  if ((now - ${GEO_TICK:-0} >= 200)); then
+    GEO_TICK=$now
+    [[ $MODE == tablet ]] && remember_geometry
+  fi
   if [[ -n $PENDING ]] && ((now - PENDING_AT >= $(cfg_int debounce_ms 400))); then
     local t
     t=$(transform_for "$PENDING")
@@ -1126,7 +1165,7 @@ cmd_daemon() {
   trap daemon_exit EXIT
   trap 'exit 0' TERM INT HUP
 
-  MODE=laptop SOURCE=start LOCK=false ORIENT="" OSK_VISIBLE=false TWEAKS_ON=false
+  MODE=laptop SOURCE=start LOCK=false ORIENT="" OSK_VISIBLE=false TWEAKS_ON=false GEO_TICK=0
   PENDING="" PENDING_AT=0 KBD_PENDING="" ASLEEP=false RESUME_AT="" OSK_RESTORE=false
   DESK=false OSK_RESTORE_DESK=false BLOCKED_NOTIFIED=""
   KBD=$(keyboard_state)
@@ -1143,13 +1182,10 @@ cmd_daemon() {
   if [[ $KBD == detached ]]; then enter_tablet keyboard; else write_state; fi
 
   while true; do
-    if [[ -n $PENDING || -n $KBD_PENDING || -n $RESUME_AT ]]; then
-      IFS= read -r -t 0.1 line <&3
-      rc=$?
-    else
-      IFS= read -r line <&3
-      rc=$?
-    fi
+    # A drag emits no event at all, so the loop wakes by itself to remember where a floating
+    # window is: that sample is the only way to put the window back where the user left it.
+    IFS= read -r -t 0.2 line <&3
+    rc=$?
     ((rc == 0)) && handle_event "$line"
     apply_pending
   done
@@ -1166,7 +1202,7 @@ restore_live() {
     tweaks_restore
   elif [[ -f $ROTATED || -f $TOUCH_MAPPED || -f $TWEAKS ]]; then
     log "Hyprland isn't reachable; its changes end with this session anyway"
-    rm -f "$ROTATED" "$TOUCH_MAPPED" "$TWEAKS"
+    rm -f "$ROTATED" "$TOUCH_MAPPED" "$TWEAKS" "$REFLOAT" "$GEOMETRY"
   fi
   rm -f "$STATE"
 }

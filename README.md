@@ -45,6 +45,7 @@ skips the build, and `./uninstall.sh` reverts the service and `osk=`.
 | Rotation | Follows the accelerometer, touchscreen and pen included | Landscape |
 | On-screen keyboard | Shown: a US desktop layout ([wvkbd](https://git.sr.ht/~proycon/wvkbd), themed to match), plus a floating ⌨ button to show or hide it | Hidden |
 | Touch tweaks | Wider gaps; borders easier to grab | Hyprland's own values back |
+| Floating windows | A window that loses floating on a floating workspace is floated again, where you left it | — |
 | Notification | "Tablet mode" | "Laptop mode" |
 
 External monitors are never rotated. Your `monitors.lua` is never edited: every change is applied live, re-applied after a config reload, and undone when the plugin stops.
