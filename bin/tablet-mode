@@ -26,6 +26,7 @@ INHIBITOR="$RUN_DIR/inhibitor.pid"
 ROTATED="$RUN_DIR/rotated"           # "<output> <transform before the first rotation>"
 TOUCH_MAPPED="$RUN_DIR/touch-mapped" # input devices whose transform/output were set
 TWEAKS="$RUN_DIR/tweaks.lua"         # hl.config(...) that puts the pre-tweak values back
+REFLOAT="$RUN_DIR/refloat"           # "<address> <epoch> <tries>": windows already put back once
 # The last clean record of the user's own values, kept across sessions: used when the live
 # values can't be trusted because they already look like our tweaks.
 BASELINE="${TABLET_MODE_BASELINE:-${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-tablet-mode/baseline.lua}"
@@ -451,6 +452,42 @@ tweaks_restore() {
   TWEAKS_ON=false
 }
 
+# Omarchy's floating mode floats a window once and never again: whatever tiles one
+# afterwards — a drag that lands on the title bar, an app tiling itself — leaves it tiled on
+# a floating workspace until a window opens or the workspace is switched, and the user reads
+# that as "the layout flipped". Put such a window back, but only while its workspace really
+# is in floating mode, and give up on one that keeps going back so an app that insists on
+# its own tiling cannot turn this into a loop.
+refloat() { # <address from the changefloatingmode event, without the 0x>
+  local address=$1 ws now seen count
+  [[ -n $address ]] || return 0
+  hypr_available || return 0
+
+  ws=$(hyprctl clients -j 2>/dev/null |
+    jq -r --arg a "0x$address" 'first(.[] | select(.address == $a) | .workspace.id) // empty')
+  [[ -n $ws ]] || return 0
+  [[ $(omarchy-hyprland-workspace-layout-current "$ws" 2>/dev/null) == floating ]] || return 0
+
+  now=$(date +%s)
+  read -r seen count < <(awk -v a="$address" '$1 == a { print $2, $3 }' "$REFLOAT" 2>/dev/null)
+  if ((now - ${seen:-0} < 60)); then
+    if [[ ${count:-0} -ge 5 ]]; then
+      log "refloat: $address went tiled again; leaving it alone after 5 tries in a minute"
+      return 0
+    fi
+  else
+    count=0
+  fi
+  count=$(( ${count:-0} + 1 ))
+  {
+    grep -v "^$address " "$REFLOAT" 2>/dev/null
+    printf '%s %s %s\n' "$address" "$now" "$count"
+  } >"$REFLOAT.new" 2>/dev/null && mv "$REFLOAT.new" "$REFLOAT"
+
+  log "refloat: $address tiled on floating workspace $ws; floating it again"
+  hypr_eval "hl.dispatch(hl.dsp.window.float({ action = \"on\", window = \"address:0x$address\" }))"
+}
+
 # --- on-screen keyboard (wvkbd) ----------------------------------------------------
 
 # The keyboard program to run, or nothing if none is installed.
@@ -625,13 +662,18 @@ cmd__usb_reader() {
 }
 
 cmd__hypr_reader() {
-  local socket="${XDG_RUNTIME_DIR:-}/hypr/${HYPRLAND_INSTANCE_SIGNATURE:-}/.socket2.sock" line
+  local socket="${XDG_RUNTIME_DIR:-}/hypr/${HYPRLAND_INSTANCE_SIGNATURE:-}/.socket2.sock" line ev
   while true; do
     socat -U - "UNIX-CONNECT:$socket" 2>/dev/null | while IFS= read -r line; do
       case $line in
         configreloaded*) echo "hypr reload" ;;
         "monitoradded>>"*) echo "hypr monitor ${line#*>>}" ;;
         "monitorremoved>>"*) echo "hypr removed ${line#*>>}" ;;
+        "changefloatingmode>>"*)
+          # "address,0" is a window that just lost floating; 1 is one that gained it.
+          ev=${line#*>>}
+          [[ ${ev##*,} == 0 ]] && echo "hypr unfloat ${ev%%,*}"
+          ;;
       esac
     done
     sleep 2
@@ -954,6 +996,7 @@ on_hypr() {
     reload) reapply reload && sync_panel ;;
     "monitor "*) [[ ${1#monitor } == "$(internal_output 2>/dev/null)" ]] && reapply monitor && sync_panel ;;
     "removed "*) [[ ${1#removed } == "$(internal_output 2>/dev/null)" ]] && sync_panel ;;
+    "unfloat "*) [[ $MODE == tablet ]] && refloat "${1#unfloat }" ;;
   esac
   return 0
 }
