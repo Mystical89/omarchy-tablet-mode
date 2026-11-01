@@ -26,6 +26,7 @@ INHIBITOR="$RUN_DIR/inhibitor.pid"
 ROTATED="$RUN_DIR/rotated"           # "<output> <transform before the first rotation>"
 TOUCH_MAPPED="$RUN_DIR/touch-mapped" # input devices whose transform/output were set
 TWEAKS="$RUN_DIR/tweaks.lua"         # hl.config(...) that puts the pre-tweak values back
+HYPRBARS="$RUN_DIR/hyprbars.lua"     # the same for the floating-window title bar
 # The last clean record of the user's own values, kept across sessions: used when the live
 # values can't be trusted because they already look like our tweaks.
 BASELINE="${TABLET_MODE_BASELINE:-${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-tablet-mode/baseline.lua}"
@@ -70,7 +71,8 @@ declare -A CFG=(
   [resume_delay_ms]=2000
   [gaps_in]=8
   [gaps_out]=14
-  [border_grab]=30
+  [border_grab]=8
+  [titlebar_height]=44
   [osk_height_landscape]=420
   [osk_height_portrait]=420
   [osk_float]=false
@@ -410,7 +412,7 @@ tweaks_record_ok() {
 
 tweaks_apply() {
   local gi go bg
-  gi=$(cfg_int gaps_in 8) go=$(cfg_int gaps_out 14) bg=$(cfg_int border_grab 30)
+  gi=$(cfg_int gaps_in 8) go=$(cfg_int gaps_out 14) bg=$(cfg_int border_grab 8)
   if [[ ! -f $TWEAKS ]]; then
     local opt value general=() cursor=() record looks_tweaked
     for opt in "${TWEAK_OPTIONS[@]}"; do
@@ -436,6 +438,7 @@ tweaks_apply() {
     fi
   fi
   hypr_eval "hl.config({ general = { gaps_in = $gi, gaps_out = $go, extend_border_grab_area = $bg, resize_on_border = true }, cursor = { hide_on_touch = true } })" || return 1
+  titlebars_apply
   TWEAKS_ON=true
 }
 
@@ -448,7 +451,48 @@ tweaks_restore() {
     fi
     rm -f "$TWEAKS"
   fi
+  titlebars_restore
   TWEAKS_ON=false
+}
+
+# hyprbars draws the title bar of a floating window: 30 px tall with 20 px buttons is about
+# a fingertip wide, so on a touchscreen a drag lands on a button or reads as a double tap and
+# the window maximizes instead of moving. In tablet mode the bar grows and the double-tap
+# shortcut is dropped; both go back when tablet mode ends.
+titlebar_option() { # <hyprbars option> -> its live value, without the "int: "/"str: " prefix
+  hyprctl getoption "plugin:hyprbars:$1" 2>/dev/null | head -1 | sed -E 's/^[a-z]+: //'
+}
+
+titlebars_apply() {
+  local height before_double before_height
+  height=$(cfg_int titlebar_height 44)
+
+  if [[ ! -f $HYPRBARS ]]; then
+    before_double=$(titlebar_option on_double_click)
+    before_height=$(titlebar_option bar_height)
+    [[ $before_height =~ ^[0-9]{1,3}$ ]] || before_height=30
+    # A long-bracket string holds the command as written, quotes and all, with no escaping.
+    printf 'hl.config({ plugin = { hyprbars = { bar_height = %s, on_double_click = [[%s]] } } })\n' \
+      "$before_height" "${before_double//]]/}" >"$HYPRBARS"
+  fi
+
+  # Hyprland re-applies its own titlebar settings whenever a workspace starts floating, so
+  # this runs again on every float change; skip the work when the values are already ours.
+  if [[ $(titlebar_option bar_height) == "$height" && $(titlebar_option on_double_click) == "true" ]]; then
+    return 0
+  fi
+
+  hypr_eval "hl.config({ plugin = { hyprbars = { bar_height = $height, on_double_click = [[true]] } } })"
+}
+
+titlebars_restore() {
+  [[ -f $HYPRBARS ]] || return 0
+  if grep -qE '^hl\.config\(\{ plugin = \{ hyprbars = \{ bar_height = [0-9]{1,3}, on_double_click = \[\[[^]]*\]\] \} \} \}\)$' "$HYPRBARS"; then
+    hypr_eval "$(<"$HYPRBARS")" || log "Couldn't put the titlebar settings back"
+  else
+    log "The saved titlebar record isn't in the expected form; not evaluating it"
+  fi
+  rm -f "$HYPRBARS"
 }
 
 # --- on-screen keyboard (wvkbd) ----------------------------------------------------
@@ -632,6 +676,7 @@ cmd__hypr_reader() {
         configreloaded*) echo "hypr reload" ;;
         "monitoradded>>"*) echo "hypr monitor ${line#*>>}" ;;
         "monitorremoved>>"*) echo "hypr removed ${line#*>>}" ;;
+        "changefloatingmode>>"*) echo "hypr float" ;;
       esac
     done
     sleep 2
@@ -951,7 +996,10 @@ reapply() {
 
 on_hypr() {
   case $1 in
-    reload) reapply reload && sync_panel ;;
+    reload) reapply reload && sync_panel; [[ $MODE == tablet ]] && titlebars_apply ;;
+    # Hyprland re-applies its own title bar settings when a workspace starts floating, which
+    # is exactly when a floating window first appears in tablet mode.
+    float) [[ $MODE == tablet ]] && titlebars_apply ;;
     "monitor "*) [[ ${1#monitor } == "$(internal_output 2>/dev/null)" ]] && reapply monitor && sync_panel ;;
     "removed "*) [[ ${1#removed } == "$(internal_output 2>/dev/null)" ]] && sync_panel ;;
   esac
