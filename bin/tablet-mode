@@ -1098,6 +1098,7 @@ handle_event() {
     usb) on_usb ;;
     hypr) on_hypr "$arg" ;;
     sleep) on_sleep "$arg" ;;
+    tick) [[ $MODE == tablet ]] && remember_geometry ;;
     cmd)
       local -a words
       read -ra words <<<"$arg" # split into words without glob expansion: "rotate 1" -> rotate 1
@@ -1109,10 +1110,6 @@ handle_event() {
 apply_pending() {
   local now
   now=$(now_ms)
-  if ((now - ${GEO_TICK:-0} >= 200)); then
-    GEO_TICK=$now
-    [[ $MODE == tablet ]] && remember_geometry
-  fi
   if [[ -n $PENDING ]] && ((now - PENDING_AT >= $(cfg_int debounce_ms 400))); then
     local t
     t=$(transform_for "$PENDING")
@@ -1141,6 +1138,7 @@ daemon_exit() {
   local name
   for name in sensor usb hypr sleep; do stop_reader "$name"; done
   inhibit_release
+  [[ -n ${TICKER:-} ]] && kill "$TICKER" 2>/dev/null
   restore_live
   rm -f "$DAEMON_PID" "$FIFO"
 }
@@ -1164,8 +1162,14 @@ cmd_daemon() {
   exec 3<>"$FIFO"
   trap daemon_exit EXIT
   trap 'exit 0' TERM INT HUP
+  # A drag emits no event at all, so something has to wake the loop to remember where a
+  # floating window is; that sample is the only way to put it back where the user left it.
+  # It writes into the same FIFO the readers use, which keeps the main loop a plain blocking
+  # read — a timed read there segfaults bash when SIGTERM lands in the middle of it.
+  ( while :; do sleep 0.2; printf 'tick\n' >&3 || exit 0; done ) &
+  TICKER=$!
 
-  MODE=laptop SOURCE=start LOCK=false ORIENT="" OSK_VISIBLE=false TWEAKS_ON=false GEO_TICK=0
+  MODE=laptop SOURCE=start LOCK=false ORIENT="" OSK_VISIBLE=false TWEAKS_ON=false
   PENDING="" PENDING_AT=0 KBD_PENDING="" ASLEEP=false RESUME_AT="" OSK_RESTORE=false
   DESK=false OSK_RESTORE_DESK=false BLOCKED_NOTIFIED=""
   KBD=$(keyboard_state)
@@ -1182,10 +1186,13 @@ cmd_daemon() {
   if [[ $KBD == detached ]]; then enter_tablet keyboard; else write_state; fi
 
   while true; do
-    # A drag emits no event at all, so the loop wakes by itself to remember where a floating
-    # window is: that sample is the only way to put the window back where the user left it.
-    IFS= read -r -t 0.2 line <&3
-    rc=$?
+    if [[ -n $PENDING || -n $KBD_PENDING || -n $RESUME_AT ]]; then
+      IFS= read -r -t 0.1 line <&3
+      rc=$?
+    else
+      IFS= read -r line <&3
+      rc=$?
+    fi
     ((rc == 0)) && handle_event "$line"
     apply_pending
   done
