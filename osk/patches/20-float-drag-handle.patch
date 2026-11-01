@@ -1,0 +1,845 @@
+--- a/main.c
++++ b/main.c
+@@ -82,6 +82,30 @@
+ static struct wl_output *target_output = NULL;
+ static uint32_t target_output_global = 0;
+ 
++/* omarchy-tablet-mode: floating keyboard. The surface is anchored bottom-left with an
++ * explicit width, so margins place it anywhere on the output; the strip on top of the
++ * keyboard is a drag handle that moves those margins while the finger is down. */
++static bool float_mode = false;
++static uint32_t float_pct = 80;      /* width of the panel, percent of the output */
++static uint32_t float_w = 0;         /* resolved width in pixels */
++static uint32_t handle_h = 28;       /* height of the drag handle strip */
++static int32_t margin_left = 0;      /* horizontal offset of the panel */
++static int32_t margin_bottom = 0;    /* vertical offset (grows upward) */
++static bool dragging = false;
++static int32_t drag_x, drag_y, drag_margin_left, drag_margin_bottom;
++static bool debug_drag = false;
++static bool debug_toggle = false;
++static bool debug_pages = false;
++static const char *debug_press = NULL;
++static bool float_enabled = false;  /* --float/--float-width/--handle-height seen */
++
++/* Per-orientation persisted state: [0] portrait, [1] landscape. Defaults follow
++ * tablet usage: full-width docked in portrait, floating in landscape. */
++static int32_t st_margin_left[2] = {0, 0};
++static int32_t st_margin_bottom[2] = {0, 0};
++static bool st_float[2] = {false, true};
++static bool portrait_open_dock = true; /* portrait (re)opens docked, always */
++
+ /* event handler prototypes */
+ static void wl_pointer_enter(void *data, struct wl_pointer *wl_pointer,
+                              uint32_t serial, struct wl_surface *surface,
+@@ -142,6 +166,19 @@
+ static void redimension_keyboard();
+ static void show();
+ static void hide();
++static void floating_apply_margins(void);
++static void floating_begin_drag(int32_t x, int32_t y);
++static void floating_update_drag(int32_t x, int32_t y);
++static void floating_end_drag(void);
++static bool floating_on_handle(int32_t y);
++static bool floating_on_toggle_button(int32_t x);
++static void floating_toggle_width(void);
++static void floating_debug_drag(void);
++static int float_ori_idx(void);
++static void float_apply_state(void);
++static void float_clamp_margins(void);
++static void float_state_load(void);
++static void float_state_save(void);
+ 
+ /* event handlers */
+ static const struct zwp_input_method_v2_listener input_method_listener = {
+@@ -265,6 +302,17 @@
+     touch_x = wl_fixed_to_int(x);
+     touch_y = wl_fixed_to_int(y);
+ 
++    /* omarchy-tablet-mode: the top strip is a drag handle, not a key; its
++     * right corner is the width-mode toggle (floating <-> docked). */
++    if (floating_on_handle(touch_y)) {
++        if (floating_on_toggle_button(touch_x)) {
++            floating_toggle_width();
++        } else {
++            floating_begin_drag(touch_x, touch_y);
++        }
++        return;
++    }
++
+     kbd_unpress_key(&keyboard, time);
+ 
+     next_key = kbd_get_key(&keyboard, touch_x, touch_y);
+@@ -285,6 +333,11 @@
+         return;
+     }
+ 
++    if (dragging) {
++        floating_end_drag();
++        return;
++    }
++
+     kbd_release_key(&keyboard, time);
+ }
+ 
+@@ -301,6 +354,11 @@
+     touch_x = wl_fixed_to_int(x);
+     touch_y = wl_fixed_to_int(y);
+ 
++    if (dragging) {
++        floating_update_drag(touch_x, touch_y);
++        return;
++    }
++
+     kbd_motion_key(&keyboard, time, touch_x, touch_y);
+ }
+ 
+@@ -357,6 +415,10 @@
+     cur_y = wl_fixed_to_int(surface_y);
+ 
+     if (cur_press) {
++        if (dragging) {
++            floating_update_drag(cur_x, cur_y);
++            return;
++        }
+         kbd_motion_key(&keyboard, time, cur_x, cur_y);
+     }
+ }
+@@ -375,10 +437,22 @@
+     if (cur_press) {
+         kbd_unpress_key(&keyboard, time);
+     } else {
++        if (dragging) {
++            floating_end_drag();
++            return;
++        }
+         kbd_release_key(&keyboard, time);
+     }
+ 
+     if (cur_press && cur_x >= 0 && cur_y >= 0) {
++        if (floating_on_handle(cur_y)) {
++            if (floating_on_toggle_button(cur_x)) {
++                floating_toggle_width();
++            } else {
++                floating_begin_drag(cur_x, cur_y);
++            }
++            return;
++        }
+         next_key = kbd_get_key(&keyboard, cur_x, cur_y);
+         if (next_key) {
+             kbd_press_key(&keyboard, next_key, time);
+@@ -444,6 +518,64 @@
+     .ping = xdg_wm_base_ping,
+ };
+ 
++/* omarchy-tablet-mode: Hyprland sends no wl_output event on a rotation, and a
++ * bottom-left anchored panel gets no configure either, so the keyboard would
++ * keep its old size until it is hidden and shown by hand. A tiny invisible
++ * probe layer surface anchored to all four edges receives a configure on every
++ * change of the usable area (rotation included) — that is the signal. */
++static struct wl_surface *probe_surf = NULL;
++static struct zwlr_layer_surface_v1 *probe_layer = NULL;
++static uint32_t probe_w = 0, probe_h = 0;
++static bool rotation_pending = false;
++
++static void
++probe_configure(void *data, struct zwlr_layer_surface_v1 *ls, uint32_t serial,
++                uint32_t w, uint32_t h)
++{
++    zwlr_layer_surface_v1_ack_configure(ls, serial);
++    /* The probe is anchored left+right, so its width is the output's usable
++     * width: stable while this keyboard reserves a bottom strip (dock mode)
++     * and changes only when the output is rotated. A w/h ratio would flip on
++     * every hide/show in a narrow portrait screen and loop. */
++    if ((probe_w > 0) && (w != probe_w)) {
++        rotation_pending = true;
++    }
++    probe_w = w;
++    probe_h = h;
++}
++
++static void
++probe_closed(void *data, struct zwlr_layer_surface_v1 *ls)
++{
++    zwlr_layer_surface_v1_destroy(ls);
++    probe_layer = NULL;
++}
++
++static const struct zwlr_layer_surface_v1_listener probe_listener = {
++    .configure = probe_configure,
++    .closed = probe_closed,
++};
++
++static void
++probe_create(void)
++{
++    if (probe_surf || (!compositor) || (!layer_shell)) {
++        return;
++    }
++    probe_surf = wl_compositor_create_surface(compositor);
++    probe_layer = zwlr_layer_shell_v1_get_layer_surface(
++        layer_shell, probe_surf, target_output, layer, "wvkbd-probe");
++    zwlr_layer_surface_v1_set_anchor(probe_layer,
++                                     ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP |
++                                     ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT |
++                                     ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT);
++    zwlr_layer_surface_v1_set_size(probe_layer, 0, 1);
++    zwlr_layer_surface_v1_set_exclusive_zone(probe_layer, 0);
++    zwlr_layer_surface_v1_set_keyboard_interactivity(probe_layer, false);
++    zwlr_layer_surface_v1_add_listener(probe_layer, &probe_listener, NULL);
++    wl_surface_commit(probe_surf);
++}
++
+ static void
+ output_geometry(void *data, struct wl_output *wl_output, int32_t x, int32_t y,
+                 int32_t pw, int32_t ph, int32_t subpixel, const char *make,
+@@ -636,6 +768,14 @@
+ {
+     keyboard.landscape = available_width > available_height;
+ 
++    /* omarchy-tablet-mode: rotating into (or starting in) portrait always docks
++     * full-width, whatever mode portrait was left in; a manual float toggle in
++     * portrait lives until the next rotation or restart. */
++    if (portrait_open_dock && !keyboard.landscape) {
++        st_float[0] = false;
++        portrait_open_dock = false;
++    }
++
+     enum layout_id layer;
+     if (keyboard.landscape) {
+         layer = keyboard.landscape_layers[0];
+@@ -645,8 +785,16 @@
+         height = normal_height;
+     }
+ 
+-    keyboard.w = available_width;
++    float_w = (uint32_t)((double)available_width * float_pct / 100.0);
++    if (float_w > available_width) {
++        float_w = available_width;
++    }
+     keyboard.h = height;
++    float_apply_state();
++    float_clamp_margins();
++    keyboard.w = float_mode ? float_w : available_width;
++    keyboard.handle_h = float_enabled ? handle_h : 0;
++    keyboard.float_panel = float_mode;
+     keyboard.layout = &keyboard.layouts[layer];
+     keyboard.layer_index = 0;
+     keyboard.prevlayout = keyboard.layout;
+@@ -719,6 +867,31 @@
+ 
+     kbd_resize(&keyboard, layouts, NumLayouts);
+     drwsurf_attach(&draw_surf);
++
++    if (debug_drag) {
++        floating_debug_drag();
++    }
++    if (debug_toggle) {
++        floating_toggle_width();
++        fprintf(stderr, "debug-toggle: float_mode now %d\n", float_mode);
++    }
++    if (debug_pages) {
++        kbd_toggle_special(&keyboard);
++        fprintf(stderr, "debug-pages: layout=%s\n", keyboard.layout->name);
++        kbd_toggle_special(&keyboard);
++        fprintf(stderr, "debug-pages: layout=%s\n", keyboard.layout->name);
++    }
++    if (debug_press) {
++        char *copy = estrdup(debug_press);
++        char *saveptr = NULL;
++        char *tok = strtok_r(copy, ";", &saveptr);
++        while (tok) {
++            kbd_debug_press(&keyboard, tok);
++            tok = strtok_r(NULL, ";", &saveptr);
++        }
++        free(copy);
++        fprintf(stderr, "debug-press: done\n");
++    }
+ }
+ 
+ void
+@@ -789,6 +962,13 @@
+     fprintf(stderr, "  --non-exclusive    - Allow the keyboard to overlap"
+                     " windows. Do not request an exclusive zone from the"
+                     "compositor\n");
++    fprintf(stderr, "  --float            - omarchy: float the keyboard as a panel with a drag handle on top\n");
++    fprintf(stderr, "  --float-width [%%]  - omarchy: width of the floating panel, percent of the output (default 80)\n");
++    fprintf(stderr, "  --handle-height [px] - omarchy: height of the drag handle strip (default 28)\n");
++    fprintf(stderr, "  --debug-drag       - omarchy: run one scripted drag of the handle (for testing)\n");
++    fprintf(stderr, "  --debug-toggle     - omarchy: run one scripted float/dock toggle (for testing)\n");
++    fprintf(stderr, "  --debug-pages      - omarchy: toggle symbols page and back (for testing)\n");
++    fprintf(stderr, "  --debug-press [l1,l2] - omarchy: type keys by label (for testing)\n");
+ }
+ 
+ void
+@@ -858,6 +1038,248 @@
+     hidden = true;
+ }
+ 
++/* omarchy-tablet-mode: floating keyboard helpers ------------------------------- */
++
++static bool
++floating_on_handle(int32_t y)
++{
++    /* The handle is the strip at the very top of the panel. In docked mode it
++     * collapses to half height and only carries the toggle button. */
++    if (!float_enabled || keyboard.handle_h == 0 || y < 0) {
++        return false;
++    }
++    uint32_t hh = float_mode ? keyboard.handle_h : keyboard.handle_h / 2;
++    return (uint32_t)y < hh;
++}
++
++static void
++floating_apply_margins(void)
++{
++    if (!layer_surface || !float_enabled || !float_mode) {
++        return;
++    }
++    zwlr_layer_surface_v1_set_margin(layer_surface, 0, 0, margin_bottom,
++                                     margin_left);
++    wl_surface_commit(draw_surf.surf);
++}
++
++static void
++floating_begin_drag(int32_t x, int32_t y)
++{
++    if (!float_mode) {
++        return;
++    }
++    dragging = true;
++    drag_x = x;
++    drag_y = y;
++    drag_margin_left = margin_left;
++    drag_margin_bottom = margin_bottom;
++}
++
++static void
++floating_update_drag(int32_t x, int32_t y)
++{
++    if (!dragging) {
++        return;
++    }
++    int32_t dx = x - drag_x;
++    int32_t dy = y - drag_y;
++
++    int32_t max_left = (int32_t)available_width - (int32_t)float_w;
++    if (max_left < 0) {
++        max_left = 0;
++    }
++    int32_t new_left = drag_margin_left + dx;
++    if (new_left < 0) {
++        new_left = 0;
++    }
++    if (new_left > max_left) {
++        new_left = max_left;
++    }
++    margin_left = new_left;
++
++    /* Dragging up lifts the panel: the bottom margin grows. */
++    int32_t max_bottom = (int32_t)available_height - (int32_t)height;
++    if (max_bottom < 0) {
++        max_bottom = 0;
++    }
++    int32_t new_bottom = drag_margin_bottom - dy;
++    if (new_bottom < 0) {
++        new_bottom = 0;
++    }
++    if (new_bottom > max_bottom) {
++        new_bottom = max_bottom;
++    }
++    margin_bottom = new_bottom;
++
++    if (keyboard.debug) {
++        fprintf(stderr, "drag: margin_left=%d margin_bottom=%d\n", margin_left,
++                margin_bottom);
++    }
++    floating_apply_margins();
++}
++
++static void
++floating_end_drag(void)
++{
++    dragging = false;
++    float_state_save();
++}
++
++/* omarchy-tablet-mode: persisted per-orientation floating state. Portrait and
++ * landscape keep separate positions and modes: a panel parked in landscape is
++ * rarely where it should be on a narrow portrait screen, and vice versa. */
++static int
++float_ori_idx(void)
++{
++    return keyboard.landscape ? 1 : 0;
++}
++
++static void
++float_apply_state(void)
++{
++    int i = float_ori_idx();
++    float_mode = st_float[i];
++    margin_left = st_margin_left[i];
++    margin_bottom = st_margin_bottom[i];
++}
++
++static void
++float_clamp_margins(void)
++{
++    /* A position saved on a wide output can be off-screen on a narrow one
++     * (landscape -> portrait), so margins are clamped on every apply. */
++    int32_t max_left = (int32_t)available_width - (int32_t)float_w;
++    if (max_left < 0) {
++        max_left = 0;
++    }
++    if (margin_left > max_left) {
++        margin_left = max_left;
++    }
++    if (margin_left < 0) {
++        margin_left = 0;
++    }
++    int32_t max_bottom = (int32_t)available_height - (int32_t)height;
++    if (max_bottom < 0) {
++        max_bottom = 0;
++    }
++    if (margin_bottom > max_bottom) {
++        margin_bottom = max_bottom;
++    }
++    if (margin_bottom < 0) {
++        margin_bottom = 0;
++    }
++}
++
++static bool
++float_state_path(char *buf, size_t buflen)
++{
++    const char *env = getenv("WVKBD_FLOAT_STATE");
++    if (env) {
++        snprintf(buf, buflen, "%s", env);
++        return true;
++    }
++    const char *cache = getenv("XDG_CACHE_HOME");
++    if (cache) {
++        snprintf(buf, buflen, "%s/wvkbd-deskus-float.state", cache);
++        return true;
++    }
++    const char *home = getenv("HOME");
++    if (!home) {
++        return false;
++    }
++    snprintf(buf, buflen, "%s/.cache/wvkbd-deskus-float.state", home);
++    return true;
++}
++
++static void
++float_state_save(void)
++{
++    int i = float_ori_idx();
++    st_float[i] = float_mode;
++    st_margin_left[i] = margin_left;
++    st_margin_bottom[i] = margin_bottom;
++
++    char path[512];
++    if (!float_state_path(path, sizeof(path))) {
++        return;
++    }
++    FILE *f = fopen(path, "w");
++    if (!f) {
++        return;
++    }
++    fprintf(f, "portrait margin_left=%d margin_bottom=%d float=%d\n",
++            st_margin_left[0], st_margin_bottom[0], st_float[0] ? 1 : 0);
++    fprintf(f, "landscape margin_left=%d margin_bottom=%d float=%d\n",
++            st_margin_left[1], st_margin_bottom[1], st_float[1] ? 1 : 0);
++    fclose(f);
++}
++
++static void
++float_state_load(void)
++{
++    char path[512];
++    if (!float_state_path(path, sizeof(path))) {
++        return;
++    }
++    FILE *f = fopen(path, "r");
++    if (!f) {
++        return;
++    }
++    char tag[32];
++    int l, b, fl;
++    while (fscanf(f, "%31s margin_left=%d margin_bottom=%d float=%d",
++                  tag, &l, &b, &fl) == 4) {
++        int i = strcmp(tag, "portrait") == 0 ? 0 : 1;
++        st_margin_left[i] = l;
++        st_margin_bottom[i] = b;
++        st_float[i] = fl ? true : false;
++    }
++    fclose(f);
++}
++
++/* omarchy-tablet-mode: the right corner of the handle (or of the slim docked
++ * bar) is the width-mode toggle. Tapping it switches floating <-> full-width
++ * docked (exclusive zone on, windows are pushed aside instead of covered). */
++#define FLOAT_TOGGLE_W 56
++static bool
++floating_on_toggle_button(int32_t x)
++{
++    if (!float_enabled || keyboard.handle_h == 0 || x < 0) {
++        return false;
++    }
++    uint32_t btn_w = FLOAT_TOGGLE_W;
++    if (btn_w > keyboard.w / 3) {
++        btn_w = keyboard.w / 3;
++    }
++    return (uint32_t)x >= keyboard.w - btn_w;
++}
++
++static void
++floating_toggle_width(void)
++{
++    float_mode = !float_mode;
++    float_state_save();
++    hide();
++    show();
++}
++
++/* omarchy-tablet-mode: --debug-drag runs the same begin/update/end sequence the
++ * touch handler uses, so the margin maths and the layer-shell update can be
++ * verified without a finger on the screen. */
++static void
++floating_debug_drag(void)
++{
++    int32_t sx = 100, sy = 200, tx = 200, ty = 60;
++    fprintf(stderr, "debug-drag: start margins left=%d bottom=%d\n",
++            margin_left, margin_bottom);
++    floating_begin_drag(sx, sy);
++    floating_update_drag(tx, ty);
++    fprintf(stderr, "debug-drag: moved to left=%d bottom=%d\n", margin_left,
++            margin_bottom);
++    floating_end_drag();
++}
++
+ void
+ show()
+ {
+@@ -885,10 +1307,27 @@
+     layer_surface = zwlr_layer_shell_v1_get_layer_surface(
+         layer_shell, draw_surf.surf, current_output_data, layer, namespace);
+ 
+-    zwlr_layer_surface_v1_set_size(layer_surface, 0, height);
+-    zwlr_layer_surface_v1_set_anchor(layer_surface, anchor);
+-    if (keyboard.exclusive) {
+-        zwlr_layer_surface_v1_set_exclusive_zone(layer_surface, height);
++    float_mode = float_enabled && float_mode;
++    if (float_mode) {
++        /* Anchored bottom-left with an explicit width: the panel is a floating
++         * rectangle, and the margins place it. Anchored bottom+left only, so the
++         * bottom margin lifts it up and the left margin shifts it right. */
++        zwlr_layer_surface_v1_set_size(layer_surface, float_w, height);
++        zwlr_layer_surface_v1_set_anchor(layer_surface,
++                                         ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM |
++                                         ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT);
++        zwlr_layer_surface_v1_set_margin(layer_surface, 0, 0, margin_bottom,
++                                         margin_left);
++        /* A floating panel overlaps the windows under it, so reserve no space. */
++        zwlr_layer_surface_v1_set_exclusive_zone(layer_surface, 0);
++    } else {
++        /* Docked full-width: the pre-floating behaviour. The exclusive zone
++         * pushes windows above the keyboard, so nothing is covered. */
++        zwlr_layer_surface_v1_set_size(layer_surface, 0, height);
++        zwlr_layer_surface_v1_set_anchor(layer_surface, anchor);
++        if (keyboard.exclusive) {
++            zwlr_layer_surface_v1_set_exclusive_zone(layer_surface, height);
++        }
+     }
+     zwlr_layer_surface_v1_set_keyboard_interactivity(layer_surface, false);
+     zwlr_layer_surface_v1_add_listener(layer_surface, &layer_surface_listener,
+@@ -968,6 +1407,27 @@
+         normal_height = atoi(tmp);
+     if ((tmp = getenv("WVKBD_LANDSCAPE_HEIGHT")))
+         landscape_height = atoi(tmp);
++    /* omarchy-tablet-mode: floating keyboard, so the panel can be dragged. */
++    if ((tmp = getenv("WVKBD_FLOAT")) && (*tmp == '1' || *tmp == 'y')) {
++        float_mode = true;
++        float_enabled = true;
++    }
++    if ((tmp = getenv("WVKBD_FLOAT_WIDTH"))) {
++        float_pct = (uint32_t)atoi(tmp);
++        if (float_pct == 0 || float_pct > 100) {
++            float_pct = 80;
++        }
++        float_mode = true;
++        float_enabled = true;
++    }
++    if ((tmp = getenv("WVKBD_HANDLE_HEIGHT"))) {
++        handle_h = (uint32_t)atoi(tmp);
++        if (handle_h == 0 || handle_h > 200) {
++            handle_h = 28;
++        }
++        float_mode = true;
++        float_enabled = true;
++    }
+ 
+     /* keyboard settings */
+     keyboard.layers = (enum layout_id *)&layers;
+@@ -1162,6 +1622,44 @@
+             exit(0);
+         } else if ((!strcmp(argv[i], "-non-exclusive")) || (!strcmp(argv[i], "--non-exclusive"))) {
+             keyboard.exclusive = false;
++        } else if ((!strcmp(argv[i], "--float"))) {
++            /* omarchy-tablet-mode: floating panel with a drag handle. */
++            float_mode = true;
++            float_enabled = true;
++        } else if ((!strcmp(argv[i], "--float-width"))) {
++            if (i >= argc - 1) {
++                usage(argv[0]);
++                exit(1);
++            }
++            float_pct = (uint32_t)atoi(argv[++i]);
++            if (float_pct == 0 || float_pct > 100) {
++                float_pct = 80;
++            }
++            float_mode = true;
++            float_enabled = true;
++        } else if ((!strcmp(argv[i], "--handle-height"))) {
++            if (i >= argc - 1) {
++                usage(argv[0]);
++                exit(1);
++            }
++            handle_h = (uint32_t)atoi(argv[++i]);
++            if (handle_h == 0 || handle_h > 200) {
++                handle_h = 28;
++            }
++            float_mode = true;
++            float_enabled = true;
++        } else if ((!strcmp(argv[i], "--debug-drag"))) {
++            debug_drag = true;
++        } else if ((!strcmp(argv[i], "--debug-toggle"))) {
++            debug_toggle = true;
++        } else if ((!strcmp(argv[i], "--debug-pages"))) {
++            debug_pages = true;
++        } else if ((!strcmp(argv[i], "--debug-press"))) {
++            if (i >= argc - 1) {
++                usage(argv[0]);
++                exit(1);
++            }
++            debug_press = argv[++i];
+         } else if ((!strcmp(argv[i], "-auto")) ||
+                    (!strcmp(argv[i], "--auto"))) {
+             im_auto = true;
+@@ -1251,6 +1749,13 @@
+         zwp_input_method_v2_add_listener(input_method, &input_method_listener, NULL);
+     }
+ 
++    /* omarchy-tablet-mode: restore the per-orientation float position/mode
++     * saved by the previous run before the first surface is created. */
++    float_state_load();
++
++    /* the rotation probe must exist before the first show() */
++    probe_create();
++
+     for (i = 0; i < countof(schemes); i++) {
+         schemes[i].font_description =
+             pango_font_description_from_string(schemes[i].font);
+@@ -1291,6 +1796,18 @@
+ 
+         if (fds[WAYLAND_FD].revents & POLLIN)
+             wl_display_dispatch(display);
++
++        if (rotation_pending) {
++            /* Re-probe the usable area and rebuild the surface: this re-reads the
++             * orientation, applies that orientation's saved mode/position and
++             * gets the right size without a manual hide/show. */
++            rotation_pending = false;
++            portrait_open_dock = true;
++            if ((!hidden) && layer_surface) {
++                hide();
++                show();
++            }
++        }
+         if (fds[WAYLAND_FD].revents & POLLERR) {
+             die("Exceptional condition on wayland socket.\n");
+         }
+--- a/keyboard.c
++++ b/keyboard.c
+@@ -3,6 +3,7 @@
+ #include <stddef.h>
+ #include <stdio.h>
+ #include <sys/mman.h>
++#include <time.h>
+ #include <ctype.h>
+ #include "keyboard.h"
+ 
+@@ -205,12 +206,15 @@
+ }
+ 
+ void
+-kbd_init_layout(struct layout *l, uint32_t width, uint32_t height)
++kbd_init_layout(struct layout *l, uint32_t width, uint32_t height, uint32_t top_pad)
+ {
+     uint32_t x = 0, y = 0;
+     uint8_t rows = kbd_get_rows(l);
+ 
+-    l->keyheight = height / rows;
++    /* omarchy-tablet-mode: leave room for the drag handle above the first row. */
++    uint32_t usable = (height > top_pad) ? height - top_pad : height;
++    l->keyheight = usable / rows;
++    y = top_pad;
+ 
+     struct key *k = l->keys;
+     double rowlength = kbd_get_row_length(k);
+@@ -326,6 +330,14 @@
+             }
+         }
+ 
++        if ((kb->last_press->type == Code) && (kb->last_press->code_mod)) {
++            /* omarchy-tablet-mode: a key that forced a modifier (e.g. Shift for
++             * "!") must release it, or the next keypress comes out shifted. */
++            zwp_virtual_keyboard_v1_key_mods(kb->vkbd, time,
++                                             kb->last_press->code_mod,
++                                             WL_KEYBOARD_KEY_STATE_RELEASED);
++            zwp_virtual_keyboard_v1_modifiers(kb->vkbd, kb->mods, 0, 0, 0);
++        }
+         if (unlatch_shift) {
+             if (kb->debug) fprintf(stderr, "unlatch shift");
+             kb->mods ^= Shift;
+@@ -407,6 +419,46 @@
+     kbd_clear_last_popup(kb);
+ }
+ 
++/* omarchy-tablet-mode: the ⌨ key is a toggle, not a cycle. On a letter page it
++ * opens the symbols page; on the symbols page it returns to the page it was
++ * opened from (⌨ на кириллице -> символы -> обратно на кириллицу). */
++/* omarchy-tablet-mode: --debug-press types a key by its label without a finger,
++ * so the real input path (keymap, forced modifiers, Copy) can be verified. */
++void
++kbd_debug_press(struct kbd *kb, const char *label)
++{
++    struct key *k = kb->layout->keys;
++    while (k->type != Last) {
++        if ((k->type != Pad) && (k->type != EndRow) && k->label &&
++            (strcmp(k->label, label) == 0)) {
++            struct timespec ts = { 0, 60000000L };
++            kbd_press_key(kb, k, 0);
++            nanosleep(&ts, NULL);
++            kbd_unpress_key(kb, 0);
++            ts.tv_nsec = 90000000L;
++            nanosleep(&ts, NULL);
++            return;
++        }
++        k++;
++    }
++    fprintf(stderr, "debug-press: no key labelled %s\n", label);
++}
++
++void
++kbd_toggle_special(struct kbd *kb)
++{
++    struct layout *special = &kb->layouts[Special];
++    struct layout *target = special;
++    if (kb->layout == special) {
++        target = kb->prevlayout;
++        if ((!target) || (target == special)) {
++            target = &kb->layouts[kb->landscape ? kb->landscape_layers[0]
++                                                : kb->layers[0]];
++        }
++    }
++    kbd_switch_layout(kb, target, kbd_get_layer_index(kb, target));
++}
++
+ void
+ kbd_press_key(struct kbd *kb, struct key *k, uint32_t time)
+ {
+@@ -511,9 +563,8 @@
+             kbd_draw_key(kb, k, Unpress);
+         }
+         break;
+-    case NextLayer: //(also handles previous layer when shift modifier is on, or
+-                    //"first layer" with other modifiers)
+-        kbd_next_layer(kb, k, false);
++    case NextLayer: // omarchy-tablet-mode: the ⌨ key toggles the symbols page
++        kbd_toggle_special(kb);
+         break;
+     case BackLayer: // triggered when "Abc" keys are pressed
+         // switch to the last active alphabetical layout
+@@ -700,6 +751,48 @@
+ 
+     drw_fill_rectangle(d, kb->schemes[0].bg, 0, 0, kb->w, kb->h, 0);
+ 
++    /* omarchy-tablet-mode: the drag handle strip along the top of the panel.
++     * In docked full-width mode the strip collapses to a slim bar that still
++     * carries the float toggle, so the mode is switchable both ways. */
++    if (kb->handle_h > 0) {
++        struct clr_scheme *hs = &kb->schemes[1];
++        uint32_t hh = kb->float_panel ? kb->handle_h : kb->handle_h / 2;
++        drw_fill_rectangle(d, hs->bg, 0, 0, kb->w, hh, 0);
++        if (kb->float_panel) {
++            /* a small grip in the middle, so the handle reads as draggable */
++            uint32_t grip_w = kb->w / 6;
++            uint32_t grip_x = (kb->w - grip_w) / 2;
++            uint32_t grip_h = kb->handle_h / 8;
++            uint32_t grip_y = (kb->handle_h - grip_h) / 2;
++            drw_fill_rectangle(d, hs->fg, grip_x, grip_y, grip_w, grip_h,
++                               grip_h / 2);
++        }
++        /* float/dock toggle in the right corner: a bracket pictogram; in
++         * float mode its arms point left (dock it), in dock mode right
++         * (release it to float) */
++        uint32_t btn_w = 56;
++        if (btn_w > kb->w / 3) {
++            btn_w = kb->w / 3;
++        }
++        uint32_t btn_x = kb->w - btn_w;
++        uint32_t py = hh / 4;
++        uint32_t ph = (hh > 2 * py) ? hh - 2 * py : 1;
++        uint32_t arm = ph / 4;
++        if (arm < 1) {
++            arm = 1;
++        }
++        uint32_t cx = btn_x + btn_w / 2;
++        drw_fill_rectangle(d, hs->fg, cx - arm / 2, py, arm, ph, 0);
++        uint32_t aw = btn_w / 3;
++        if (kb->float_panel) {
++            drw_fill_rectangle(d, hs->fg, cx - aw, py, aw, arm, 0);
++            drw_fill_rectangle(d, hs->fg, cx - aw, py + ph - arm, aw, arm, 0);
++        } else {
++            drw_fill_rectangle(d, hs->fg, cx, py, aw, arm, 0);
++            drw_fill_rectangle(d, hs->fg, cx, py + ph - arm, aw, arm, 0);
++        }
++    }
++
+     while (next_key->type != Last) {
+         if ((next_key->type == Pad) || (next_key->type == EndRow)) {
+             next_key++;
+@@ -732,7 +825,8 @@
+                 fprintf(stderr, "Initialising unnamed layout %d, keymap %s\n",
+                         i, layouts[i].keymap_name);
+         }
+-        kbd_init_layout(&layouts[i], kb->w, kb->h);
++        uint32_t top_pad = kb->float_panel ? kb->handle_h : kb->handle_h / 2;
++        kbd_init_layout(&layouts[i], kb->w, kb->h, top_pad);
+     }
+     kbd_draw_layout(kb);
+ }
+--- a/keyboard.h
++++ b/keyboard.h
+@@ -126,6 +126,8 @@
+ 	struct zwp_virtual_keyboard_v1 *vkbd;
+ 
+ 	uint32_t last_popup_x, last_popup_y, last_popup_w, last_popup_h;
++	uint32_t handle_h;   /* omarchy: height of the drag handle strip on top */
++	bool float_panel;    /* omarchy: floating panel mode (handle + margins) */
+ };
+ 
+ void draw_inset(struct drwsurf *ds, uint32_t x, uint32_t y, uint32_t width,
+@@ -133,9 +135,11 @@
+ void draw_over_inset(struct drwsurf *ds, uint32_t x, uint32_t y, uint32_t width,
+                      uint32_t height, uint32_t border, Color color, int rounding);
+ 
++void kbd_toggle_special(struct kbd *kb);
++void kbd_debug_press(struct kbd *kb, const char *label);
+ void kbd_init(struct kbd *kb, struct layout *layouts,
+               char *layer_names_list, char *landscape_layer_names_list);
+-void kbd_init_layout(struct layout *l, uint32_t width, uint32_t height);
++void kbd_init_layout(struct layout *l, uint32_t width, uint32_t height, uint32_t top_pad);
+ struct key *kbd_get_key(struct kbd *kb, uint32_t x, uint32_t y);
+ size_t kbd_get_layer_index(struct kbd *kb, struct layout *l);
+ void kbd_unpress_key(struct kbd *kb, uint32_t time);

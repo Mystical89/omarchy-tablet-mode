@@ -1,0 +1,54 @@
+# Example config for the wvkbd-deskus setup this fork installs.
+# install.sh copies this file when ~/.config/omarchy/tablet-mode.conf is absent,
+# otherwise it only rewrites the osk_* keys below and keeps your other settings.
+#
+# keyboard= and output= are machine-specific: take the USB id from lsusb for
+# your own detachable keyboard, or set keyboard=none to drive tablet mode by hand.
+
+# Tablet mode (alanroman117.tablet-mode). Edit, then: systemctl --user restart omarchy-tablet-mode
+
+# false = plain Omarchy: nothing runs, nothing is changed (tablet-mode disable / enable).
+enabled=true
+
+# USB id of the detachable keyboard (vendor:product, from lsusb). Detached = tablet mode.
+# The default is the ROG Flow Z13's; set yours. An id never seen on this machine doesn't
+# switch modes until it's been attached once. "none" turns detection off (toggle only).
+keyboard=044e:120d
+
+# Built-in display; "auto" picks the first eDP/LVDS/DSI output.
+output=auto
+
+# Touchscreens turned with the display: "auto" takes the only one there is. With several
+# (an external touch monitor), list the built-in one(s), comma-separated, as hyprctl devices
+# names them; until then touch isn't turned.
+touch_devices=auto
+
+# What tablet mode does.
+auto_rotate=true
+show_keyboard=true
+touch_tweaks=true
+notify=true
+
+# Accelerometer mapping, set by `tablet-mode calibrate`.
+orientation_offset=0
+orientation_mirror=false
+# How long an orientation has to hold before the screen turns (ms).
+debounce_ms=400
+
+# Touch tweaks (pixels): window gaps, and how far outside a window border a drag still resizes it.
+gaps_in=8
+gaps_out=14
+border_grab=30
+
+# On-screen keyboard: auto (the US desktop layout if installed), wvkbd-deskus or wvkbd-mobintl.
+osk=wvkbd-deskus
+
+# On-screen keyboard height (pixels) in landscape and portrait.
+osk_height_landscape=350
+osk_height_portrait=350
+
+# Floating keyboard: a panel with a drag handle on top, movable around the screen.
+# Needs the wvkbd-deskus build from ~/projects/wvkbd-deskus-ru.
+osk_float=true
+osk_float_width=80
+osk_handle_height=28

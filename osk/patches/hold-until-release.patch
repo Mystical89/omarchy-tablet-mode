@@ -1,0 +1,76 @@
+SPDX-License-Identifier: GPL-3.0-only
+A held key stays down until the finger lifts; it's released on touch-cancel, on hide and when the compositor closes the keyboard, with no frame callback or surface outliving it.
+Part of the wvkbd-deskus recipe in alanroman117.tablet-mode; derived from wvkbd 0.20
+(https://git.sr.ht/~proycon/wvkbd), whose COPYING puts it under the GPL v3.0.
+
+--- a/keyboard.c
++++ b/keyboard.c
+@@ -396,9 +396,10 @@
+             kb->last_swipe = intersect_key;
+             kbd_draw_key(kb, kb->last_swipe, Swipe);
+         }
+-    } else {
+-        kbd_unpress_key(kb, time);
+     }
++    // omarchy-tablet-mode: a held key stays held until the finger lifts, like a physical
++    // key, so hold-to-talk keys (F9) survive a slightly moving finger. Upstream releases it
++    // on any motion. The press itself was already sent at touch-down, so typing is unchanged.
+ 
+     kbd_clear_last_popup(kb);
+ }
+--- a/main.c
++++ b/main.c
+@@ -305,6 +305,11 @@
+ void
+ wl_touch_cancel(void *data, struct wl_touch *wl_touch)
+ {
++    // omarchy-tablet-mode: a cancelled touch never gets its up event, so let go of
++    // a key held by it (held keys no longer release on motion).
++    if (layer_surface_configured && popup_xdg_surface_configured) {
++        kbd_release_key(&keyboard, 0);
++    }
+ }
+ 
+ void
+@@ -644,8 +649,13 @@
+ void
+ layer_surface_closed(void *data, struct zwlr_layer_surface_v1 *surface)
+ {
+-    zwlr_layer_surface_v1_destroy(surface);
+-    wl_surface_destroy(draw_surf.surf);
++    // omarchy-tablet-mode: the compositor closed the keyboard (its output went away, say).
++    // Tear down through hide(): it lets go of a held key while the surfaces still exist,
++    // cancels pending frame callbacks and clears every pointer, so a SIGUSR1 handled in the
++    // same loop pass finds nothing to draw on or destroy twice. Then flush, because the
++    // loop that would have sent the key release ends here.
++    hide();
++    wl_display_flush(display);
+     run_display = false;
+ }
+ 
+@@ -723,6 +733,11 @@
+         return;
+     }
+ 
++    // omarchy-tablet-mode: let go of a held key while the surface still exists. A
++    // touch that ends after this lands on no surface (resizes and rotation go
++    // through hide/show too), so its release would otherwise be lost.
++    kbd_release_key(&keyboard, 0);
++
+     if (wfs_draw_surf) {
+         wp_fractional_scale_v1_destroy(wfs_draw_surf);
+         wfs_draw_surf = NULL;
+@@ -739,6 +754,13 @@
+         xdg_surface_destroy(popup_xdg_surface);
+         popup_xdg_surface = NULL;
+     }
++    // omarchy-tablet-mode: releasing the key above clears its popup, which queues a
++    // frame callback on the popup surface. Cancel it, as upstream does for the main
++    // surface below, or it fires on the destroyed surface and crashes.
++    if (popup_draw_surf.frame_cb) {
++        wl_callback_destroy(popup_draw_surf.frame_cb);
++        popup_draw_surf.frame_cb = NULL;
++    }
+     if (popup_draw_surf.surf) {
+         wl_surface_destroy(popup_draw_surf.surf);
+         popup_draw_surf.surf = NULL;

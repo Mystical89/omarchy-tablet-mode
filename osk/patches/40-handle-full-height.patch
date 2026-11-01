@@ -1,0 +1,31 @@
+--- a/keyboard.c
++++ b/keyboard.c
+@@ -756,7 +756,7 @@
+      * carries the float toggle, so the mode is switchable both ways. */
+     if (kb->handle_h > 0) {
+         struct clr_scheme *hs = &kb->schemes[1];
+-        uint32_t hh = kb->float_panel ? kb->handle_h : kb->handle_h / 2;
++        uint32_t hh = kb->handle_h;
+         drw_fill_rectangle(d, hs->bg, 0, 0, kb->w, hh, 0);
+         if (kb->float_panel) {
+             /* a small grip in the middle, so the handle reads as draggable */
+@@ -825,7 +825,7 @@
+                 fprintf(stderr, "Initialising unnamed layout %d, keymap %s\n",
+                         i, layouts[i].keymap_name);
+         }
+-        uint32_t top_pad = kb->float_panel ? kb->handle_h : kb->handle_h / 2;
++        uint32_t top_pad = kb->handle_h;
+         kbd_init_layout(&layouts[i], kb->w, kb->h, top_pad);
+     }
+     kbd_draw_layout(kb);
+--- a/main.c
++++ b/main.c
+@@ -1048,7 +1048,7 @@
+     if (!float_enabled || keyboard.handle_h == 0 || y < 0) {
+         return false;
+     }
+-    uint32_t hh = float_mode ? keyboard.handle_h : keyboard.handle_h / 2;
++    uint32_t hh = keyboard.handle_h;
+     return (uint32_t)y < hh;
+ }
+ 

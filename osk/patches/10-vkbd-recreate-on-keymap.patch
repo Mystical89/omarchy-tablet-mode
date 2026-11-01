@@ -1,0 +1,52 @@
+--- a/main.c
++++ b/main.c
+@@ -32,7 +32,7 @@
+ static const char *namespace = "wvkbd";
+ static struct wl_display *display;
+ static struct wl_compositor *compositor;
+-static struct wl_seat *seat;
++struct wl_seat *seat;   /* omarchy: shared with keyboard.c for vkbd recreation */
+ static struct wl_pointer *pointer;
+ static struct wl_touch *touch;
+ static struct wl_region *empty_region;
+@@ -42,7 +42,7 @@
+ static struct xdg_surface *popup_xdg_surface;
+ static struct xdg_popup *popup_xdg_popup;
+ static struct xdg_positioner *popup_xdg_positioner;
+-static struct zwp_virtual_keyboard_manager_v1 *vkbd_mgr;
++struct zwp_virtual_keyboard_manager_v1 *vkbd_mgr;   /* omarchy: shared with keyboard.c */
+ static struct wp_fractional_scale_v1 *wfs_draw_surf;
+ static struct wp_fractional_scale_manager_v1 *wfs_mgr;
+ static struct wp_viewport *draw_surf_viewport, *popup_draw_surf_viewport;
+--- a/keyboard.c
++++ b/keyboard.c
+@@ -5,6 +5,9 @@
+ #include <sys/mman.h>
+ #include <ctype.h>
+ #include "keyboard.h"
++
++extern struct wl_seat *seat;
++extern struct zwp_virtual_keyboard_manager_v1 *vkbd_mgr;
+ #include "drw.h"
+ #include "os-compatibility.h"
+ 
+@@ -752,6 +755,19 @@
+ void
+ create_and_upload_keymap(struct kbd *kb, const char *name, uint32_t comp_unichr)
+ {
++    /* omarchy-tablet-mode: Hyprland ignores a keymap re-upload on an existing
++     * virtual keyboard object (the first upload wins), which is why switching
++     * layouts left the keys in the previous language. Recreate the object for
++     * every upload: a fresh one accepts its keymap. */
++    if (kb->vkbd) {
++        zwp_virtual_keyboard_v1_destroy(kb->vkbd);
++        kb->vkbd = NULL;
++    }
++    kb->vkbd = zwp_virtual_keyboard_manager_v1_create_virtual_keyboard(vkbd_mgr, seat);
++    if (kb->vkbd == NULL) {
++        die("failed to recreate virtual keyboard\n");
++    }
++
+     int keymap_index = -1;
+     for (int i = 0; i < NUMKEYMAPS; i++) {
+         if (!strcmp(keymap_names[i], name)) {

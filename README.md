@@ -4,6 +4,33 @@ Take the keyboard off a detachable and Omarchy turns into a tablet. The screen f
 
 **Tested so far on one machine only: ASUS ROG Flow Z13 (GZ302EA), Omarchy 4.0.6 (Qt 6.12), Hyprland 0.56.2.** Other detachables and convertibles should work after setting their keyboard's USB id and running `calibrate`.
 
+## This fork
+
+Fork of [AlanRoman117/omarchy-tablet-mode-asus-rog-flow-z13](https://github.com/AlanRoman117/omarchy-tablet-mode-asus-rog-flow-z13).
+The plugin id stays `alanroman117.tablet-mode`, so it replaces the upstream
+plugin in place and keeps your `~/.config/omarchy/tablet-mode.conf`.
+
+On top of upstream it adds:
+
+| | |
+|---|---|
+| **Floating keyboard** | `osk_float=true` turns the on-screen keyboard into a panel with a drag handle on top instead of a full-width dock. Position and mode are remembered per orientation (`osk_float_width`, `osk_handle_height`). |
+| **Full-height handle** | The docked keyboard keeps the same full-height handle strip, so the grab area does not shrink when you dock it. |
+| **Russian deskus layout** | The `deskus` layout gains a Cyrillic page in **both** layer cycles, globe keys, a filled symbols page, `Cmp` variants and `Alt` on every letter page. |
+| **Layout switching that works** | `wvkbd` uploads a new keymap on layout change and Hyprland keeps the first one it saw, so Cyrillic typed Latin. The patch re-creates the virtual-keyboard object before each upload. |
+| **Window fitting** | `osk-window-fit` moves the focused floating window above the dock and restores its exact geometry on hide. A window with a client min-size is only shifted into view, never resized or switched to maximized. A 5-second sweep pulls floating windows back inside the screen after a rotation. |
+| **Self-contained** | wvkbd 0.20 source, the whole patch chain, the window-fit service and its systemd unit live in this repository; one script builds and wires everything. |
+
+```bash
+omarchy plugin add https://github.com/Mystical89/omarchy-tablet-mode.git --enable
+cd ~/.config/omarchy/plugins/alanroman117.tablet-mode && ./install.sh
+```
+
+`install.sh` checks dependencies, builds `wvkbd-deskus` from `osk/`, installs the
+`osk-window-fit` user service, sets the `osk_*` keys in the config and restarts
+the plugin. `--dry-run` prints the plan without changing anything, `--no-build`
+skips the build, and `./uninstall.sh` reverts the service and `osk=`.
+
 <p align="center">
   <img src="docs/screenshots/tablet-landscape.png" width="62%" alt="Tablet mode in landscape on the Osaka Jade theme: an empty workspace with the US on-screen keyboard across the bottom half and the floating keyboard button just above it">
   <img src="docs/screenshots/tablet-portrait.png" width="30%" alt="The same in portrait: the screen turned 90 degrees, with the on-screen keyboard and the floating keyboard button">
@@ -105,6 +132,9 @@ If the service crashes or is killed, its `ExecStopPost` runs `tablet-mode restor
 | `gaps_in`, `gaps_out`, `border_grab` | `8`, `14`, `30` | Touch tweaks, in pixels |
 | `osk` | `auto` | On-screen keyboard: `auto` (the US build if installed), `wvkbd-deskus` or `wvkbd-mobintl` |
 | `osk_height_landscape`, `osk_height_portrait` | `420`, `420` | On-screen keyboard height (the same in both, so keys are as tall in landscape as in portrait) |
+| `osk_float` | `false` | **This fork:** floating panel with a drag handle instead of a full-width dock |
+| `osk_float_width` | `80` | **This fork:** floating panel width, percent of the output |
+| `osk_handle_height` | `28` | **This fork:** drag handle height in pixels |
 
 After editing, run `systemctl --user restart omarchy-tablet-mode`.
 
@@ -163,5 +193,5 @@ omarchy plugin remove alanroman117.tablet-mode
 ## Licence
 
 - **The plugin**, including the PKGBUILD in `packaging/wvkbd-deskus/`: MIT, see `LICENSE`.
-- **The three `.patch` files in `packaging/wvkbd-deskus/`:** GPL-3.0-only. They modify [wvkbd](https://git.sr.ht/~proycon/wvkbd), which upstream's COPYING puts under the GPL v3.0, so they're under it too; each carries an SPDX header.
+- **The three `.patch` files in `packaging/wvkbd-deskus/` and the seven in `osk/patches/`:** GPL-3.0-only. They modify [wvkbd](https://git.sr.ht/~proycon/wvkbd), which upstream's COPYING puts under the GPL v3.0, so they're under it too; each carries an SPDX header.
 - **The built package** is wvkbd itself: GPL-3.0-only, plus MIT for upstream's `os-compatibility.c` (from Weston). It installs upstream's `LICENSE`, `COPYING` and `COPYING_WESTON`. The PKGBUILD downloads wvkbd's source from upstream; none of it is copied into this repo.

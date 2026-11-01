@@ -78,37 +78,37 @@ Panel {
   }
 
   function statusCaption() {
-    if (busy === "disable") return "TURNING OFF..."
-    if (busy === "enable") return "STARTING..."
-    if (setup === "disabled") return "OFF: PLAIN OMARCHY"
-    if (setup === "install") return "NOT SET UP"
-    if (setup === "enable") return "ONE STEP LEFT"
-    if (setup === "stopped") return "STOPPED"
+    if (busy === "disable") return "ВЫКЛЮЧЕНИЕ..."
+    if (busy === "enable") return "ЗАПУСК..."
+    if (setup === "disabled") return "ВЫКЛ: ОБЫЧНЫЙ OMARCHY"
+    if (setup === "install") return "НЕ НАСТРОЕН"
+    if (setup === "enable") return "ОСТАЛСЯ ОДИН ШАГ"
+    if (setup === "stopped") return "ОСТАНОВЛЕНО"
     if (setup !== "ready") return ""
     if (tablet && info.desk) return "TABLET MODE · DESK"
-    return tablet ? "TABLET MODE" : "LAPTOP MODE"
+    return tablet ? "РЕЖИМ ПЛАНШЕТА" : "РЕЖИМ НОУТБУКА"
   }
 
   function setupText() {
     if (setup === "disabled") return "Turned off. Nothing runs and nothing is changed: rotation, the on-screen keyboard and the touch tweaks are all back to plain Omarchy."
     if (setup === "install") return "Needs iio-sensor-proxy (reads the accelerometer) and wvkbd (the on-screen keyboard). Setup installs them; it asks for your password."
-    if (setup === "enable") return "Installed. Last step: start the service and add the menu entries."
+    if (setup === "enable") return "Установлено. Последний шаг: запустить сервис и добавить пункты меню."
     if (setup === "stopped") return "The tablet-mode service isn't running."
     return ""
   }
 
   function modeSubtitle() {
     if (actionError !== "") return actionError
-    if (tablet && info.desk) return "Laptop screen off: keyboard and touch tweaks wait for it"
-    if (info.source === "manual") return tablet ? "Turned on by hand" : "Turned off by hand"
-    if (info.keyboard === "detached") return "Keyboard detached"
-    if (info.keyboard === "attached") return "Keyboard attached"
-    return "Detach the keyboard, or switch here"
+    if (tablet && info.desk) return "Экран ноутбука выключен: настройки клавиатуры и тача ждут его"
+    if (info.source === "manual") return tablet ? "Включено вручную" : "Выключено вручную"
+    if (info.keyboard === "detached") return "Клавиатура отсоединена"
+    if (info.keyboard === "attached") return "Клавиатура подключена"
+    return "Отсоедините клавиатуру или переключитесь здесь"
   }
 
   function rotationSubtitle() {
-    if (info.lock) return "Locked where it is"
-    return tablet ? "Following the accelerometer" : "Follows the accelerometer in tablet mode"
+    if (info.lock) return "Заблокировано в текущем положении"
+    return tablet ? "Следует за акселерометром" : "В режиме планшета следует за акселерометром"
   }
 
   IpcHandler {
@@ -228,8 +228,8 @@ Panel {
     active: root.tablet
     dimmed: !root.ready
     tooltipText: root.opened ? "" : (root.ready
-      ? (root.tablet ? "Tablet mode" : "Laptop mode") + (root.info.lock ? ", rotation locked" : "")
-      : (root.setup === "disabled" ? "Tablet mode: off" : "Tablet mode: not set up"))
+      ? (root.tablet ? "Режим планшета" : "Режим ноутбука") + (root.info.lock ? ", rotation locked" : "")
+      : (root.setup === "disabled" ? "Режим планшета: выключен" : "Режим планшета: не настроен"))
     onPressed: function(b) { root.toggle() }
   }
 
@@ -295,7 +295,7 @@ Panel {
               spacing: Style.space(2)
 
               Text {
-                text: "Tablet Mode"
+                text: "Режим планшета"
                 color: root.bar.foreground
                 font.family: root.bar.fontFamily
                 font.pixelSize: Style.font.title
@@ -335,7 +335,7 @@ Panel {
 
               Text {
                 anchors.right: parent.right
-                text: "KEYBOARD"
+                text: "КЛАВИАТУРА"
                 color: Qt.darker(root.bar.foreground, 1.4)
                 font.family: root.bar.fontFamily
                 font.pixelSize: Style.font.caption
@@ -371,7 +371,7 @@ Panel {
               Button {
                 width: setupRow.cellWidth
                 iconText: root.setup === "install" ? "" : "󰐥"
-                text: root.setup === "install" ? "Set up" : (root.setup === "enable" ? "Finish setup" : (root.setup === "stopped" ? "Start" : "Turn on"))
+                text: root.setup === "install" ? "Настроить" : (root.setup === "enable" ? "Завершить настройку" : (root.setup === "stopped" ? "Запустить" : "Включить"))
                 fontSize: Style.font.bodySmall
                 foreground: root.bar.foreground
                 fontFamily: root.bar.fontFamily
@@ -382,7 +382,7 @@ Panel {
               Button {
                 width: setupRow.cellWidth
                 iconText: ""
-                text: "Check"
+                text: "Проверить"
                 fontSize: Style.font.bodySmall
                 foreground: root.bar.foreground
                 fontFamily: root.bar.fontFamily
@@ -399,7 +399,7 @@ Panel {
             spacing: Style.space(12)
 
             SwitchRow {
-              title: "Tablet mode"
+              title: "Режим планшета"
               subtitle: root.modeSubtitle()
               warn: root.actionError !== ""
               checked: root.tablet
@@ -407,14 +407,14 @@ Panel {
             }
 
             SwitchRow {
-              title: "On-screen keyboard"
-              subtitle: root.info.osk ? "Shown" : "Hidden"
+              title: "Экранная клавиатура"
+              subtitle: root.info.osk ? "Показана" : "Скрыта"
               checked: !!root.info.osk
               onToggled: root.runAction("osk", ["osk", "toggle"])
             }
 
             SwitchRow {
-              title: "Rotation lock"
+              title: "Блокировка поворота"
               subtitle: root.rotationSubtitle()
               checked: !!root.info.lock
               onToggled: root.runAction("lock", ["lock", "toggle"])
@@ -430,7 +430,7 @@ Panel {
             spacing: Style.space(8)
 
             PanelSectionHeader {
-              text: "TURN THE SCREEN"
+              text: "ПОВЕРНУТЬ ЭКРАН"
               foreground: root.bar.foreground
               fontFamily: root.bar.fontFamily
             }
@@ -453,7 +453,7 @@ Panel {
 
             Text {
               textFormat: Text.PlainText
-              text: "Picking one locks rotation. Upside down or sideways when you turn it? Calibrate."
+              text: "Выбор фиксирует поворот. Если при повороте экран оказывается вверх ногами или набок — откалибруйте."
               color: root.bar.foreground
               opacity: 0.6
               font.family: root.bar.fontFamily
@@ -475,7 +475,7 @@ Panel {
             Button {
               width: toolsRow.cellWidth
               iconText: "󰑵"
-              text: "Calibrate"
+              text: "Калибровать"
               fontSize: Style.font.bodySmall
               foreground: root.bar.foreground
               fontFamily: root.bar.fontFamily
@@ -486,7 +486,7 @@ Panel {
             Button {
               width: toolsRow.cellWidth
               iconText: ""
-              text: "Check"
+              text: "Проверить"
               fontSize: Style.font.bodySmall
               foreground: root.bar.foreground
               fontFamily: root.bar.fontFamily
@@ -497,8 +497,8 @@ Panel {
             Button {
               width: toolsRow.cellWidth
               iconText: "󰐥"
-              text: "Turn off"
-              tooltipText: "Plain Omarchy: stop everything and undo every change"
+              text: "Выключить"
+              tooltipText: "Обычный Omarchy: остановить всё и отменить все изменения"
               fontSize: Style.font.bodySmall
               foreground: root.bar.foreground
               fontFamily: root.bar.fontFamily

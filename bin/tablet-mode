@@ -73,6 +73,9 @@ declare -A CFG=(
   [border_grab]=30
   [osk_height_landscape]=420
   [osk_height_portrait]=420
+  [osk_float]=false
+  [osk_float_width]=80
+  [osk_handle_height]=28
   [osk]=auto
   [touch_devices]=auto
 )
@@ -139,6 +142,9 @@ osk=auto
 # On-screen keyboard height (pixels) in landscape and portrait.
 osk_height_landscape=420
 osk_height_portrait=420
+osk_float=false
+osk_float_width=80
+osk_handle_height=28
 EOF
 }
 
@@ -479,6 +485,12 @@ osk_start() {
   help=$("$bin" --help 2>&1 || true)
   args=(-L "$(cfg_int osk_height_landscape 420)" -H "$(cfg_int osk_height_portrait 420)")
   [[ $help == *--hidden* ]] && args+=(--hidden)
+  # omarchy-tablet-mode: our wvkbd-deskus build can float the keyboard as a panel with a
+  # drag handle on top, so it can be moved around the screen instead of filling the width.
+  if [[ $help == *--float-width* ]] && [[ ${CFG[osk_float]} == true ]]; then
+    args+=(--float-width "$(cfg_int osk_float_width 80)")
+    [[ $help == *--handle-height* ]] && args+=(--handle-height "$(cfg_int osk_handle_height 28)")
+  fi
   # Our wvkbd-deskus build can stay on one output (stay-on-output.patch); others land on
   # whichever monitor has focus, so osk_show steers focus for them instead.
   local panel
