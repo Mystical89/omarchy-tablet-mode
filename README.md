@@ -44,7 +44,7 @@ skips the build, and `./uninstall.sh` reverts the service and `osk=`.
 |---|---|---|
 | Rotation | Follows the accelerometer, touchscreen and pen included | Landscape |
 | On-screen keyboard | Shown: a US desktop layout ([wvkbd](https://git.sr.ht/~proycon/wvkbd), themed to match), plus a floating ⌨ button to show or hide it | Hidden |
-| Touch tweaks | Wider gaps; a taller title bar without the double-tap shortcut | Hyprland's own values back |
+| Touch tweaks | Wider gaps; borders easier to grab | Hyprland's own values back |
 | Notification | "Tablet mode" | "Laptop mode" |
 
 External monitors are never rotated. Your `monitors.lua` is never edited: every change is applied live, re-applied after a config reload, and undone when the plugin stops.
@@ -112,9 +112,7 @@ tablet-mode enable            # all back
 
 `disable` keeps the bar icon, dimmed, with a **Turn on** button. A menu entry (**Tablet Mode Plugin**) does the same. Packages stay installed and idle: iio-sensor-proxy only starts when something asks for the accelerometer, and wvkbd doesn't run. `tablet-mode uninstall --packages` also removes `wvkbd-deskus`, the keyboard the plugin built; it leaves `iio-sensor-proxy` and the AUR `wvkbd`, which other things may use, and says how to remove them.
 
-The floating-window title bar is part of the same tweaks. Omarchy draws it 30 px tall with 20 px buttons and turns a double tap on it into "maximize", which on a touchscreen means a drag that starts on the bar lands on a button and the window maximizes instead of moving. In tablet mode the bar grows to `titlebar_height` and the double-tap shortcut is dropped; both go back when tablet mode ends, and both are re-applied whenever Hyprland redoes the bar itself (it does that every time a workspace starts floating).
-
-Your own settings (gaps, border grab area and title bar) are recorded once, when the touch tweaks first go on. A copy of the last clean record is kept in `~/.local/state/omarchy-tablet-mode/baseline.lua`. If Hyprland ever still holds the tweak values when a new record is due, that copy is used instead, so a restore always returns your real values.
+Your own settings (gaps and border grab area) are recorded once, when the touch tweaks first go on. A copy of the last clean record is kept in `~/.local/state/omarchy-tablet-mode/baseline.lua`. If Hyprland ever still holds the tweak values when a new record is due, that copy is used instead, so a restore always returns your real values.
 
 If the service crashes or is killed, its `ExecStopPost` runs `tablet-mode restore`. That's designed so the screen isn't left rotated or the keyboard left up. If Hyprland itself can't be reached at that moment, the records are dropped instead, and Hyprland's own state ends with the session.
 
@@ -131,8 +129,7 @@ If the service crashes or is killed, its `ExecStopPost` runs `tablet-mode restor
 | `orientation_offset`, `orientation_mirror` | `0`, `false` | Set by `calibrate` |
 | `debounce_ms` | `400` | How long an orientation must hold before the screen turns |
 | `resume_delay_ms` | `2000` | How long after waking from suspend before the accelerometer and keyboard come back |
-| `gaps_in`, `gaps_out`, `border_grab` | `8`, `14`, `8` | Touch tweaks, in pixels |
-| `titlebar_height` | `44` | Floating-window title bar in tablet mode, in pixels |
+| `gaps_in`, `gaps_out`, `border_grab` | `8`, `14`, `30` | Touch tweaks, in pixels |
 | `osk` | `auto` | On-screen keyboard: `auto` (the US build if installed), `wvkbd-deskus` or `wvkbd-mobintl` |
 | `osk_height_landscape`, `osk_height_portrait` | `420`, `420` | On-screen keyboard height (the same in both, so keys are as tall in landscape as in portrait) |
 | `osk_float` | `false` | **This fork:** floating panel with a drag handle instead of a full-width dock |
