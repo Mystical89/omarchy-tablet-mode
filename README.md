@@ -115,6 +115,14 @@ tablet-mode enable            # all back
 
 Your own settings (gaps and border grab area) are recorded once, when the touch tweaks first go on. A copy of the last clean record is kept in `~/.local/state/omarchy-tablet-mode/baseline.lua`. If Hyprland ever still holds the tweak values when a new record is due, that copy is used instead, so a restore always returns your real values.
 
+### Floating windows stay where you put them
+
+Omarchy's floating layout floats a window once. Anything that tiles it afterwards — a drag that ends on the title bar, an app tiling itself — leaves it tiled on a workspace that still says `floating`, and nothing asks for it again until a window opens or the workspace changes.
+
+Tablet mode watches for that. A `changefloatingmode` event is the fast path; once a second the daemon also puts back any window that is tiled on a workspace whose layout is `floating`, so a window whose event was missed does not stay tiled for good. A window that is put back lands where it was when it lost floating: the daemon samples the client list every 200 ms and keeps the geometry of whichever floating window is moving — that is the one being dragged — together with the cursor, since a finger keeps its place on the window while dragging. Attempts are limited to one per window every two seconds.
+
+The keyboard-fit service still shifts a window that is taller than the free space above the docked keyboard (landscape: 662 px against about 420). That is deliberate, and separate from this.
+
 If the service crashes or is killed, its `ExecStopPost` runs `tablet-mode restore`. That's designed so the screen isn't left rotated or the keyboard left up. If Hyprland itself can't be reached at that moment, the records are dropped instead, and Hyprland's own state ends with the session.
 
 ## Settings
